@@ -62,6 +62,19 @@ class MyCounter extends RpcTarget {
   }
 }
 
+// Used by the revocation tests: a target whose methods return further RpcTargets, to verify
+// that revocation is transitive, and a method that hangs forever, to verify that revocation
+// cancels in-flight calls.
+class CounterFactory extends RpcTarget {
+  makeCounter(i) {
+    return new MyCounter(i);
+  }
+
+  hang() {
+    return new Promise(() => {});
+  }
+}
+
 class RpcBox extends RpcTarget {
   #value;
 
@@ -138,6 +151,9 @@ export let nonClass = {
 // to fail).
 let globalRpcPromise;
 
+// Global used to test that a revoker cannot be used across I/O contexts (also expected to fail).
+let globalRevoker;
+
 // Promise initialized by testWaitUntil() and then resolved shortly later, in a waitUntil task.
 let globalWaitUntilPromise;
 
@@ -188,6 +204,45 @@ export class MyService extends WorkerEntrypoint {
 
   async getAnObject(i) {
     return { foo: 123 + i, counter: new MyCounter(i) };
+  }
+
+  // Returns a revocable counter stub along with callback functions that operate the revoker.
+  // The callbacks are themselves stubified, so they run back here, in the IoContext where the
+  // revoker was created.
+  async makeRevocableCounter(i) {
+    let { stub, revoker } = RpcStub.revocable(new MyCounter(i));
+    return {
+      counter: stub,
+      revoke: (message) => {
+        revoker.revoke(
+          message === undefined ? undefined : new RangeError(message)
+        );
+      },
+      isRevoked: () => revoker.revoked,
+    };
+  }
+
+  async makeRevocableHanger() {
+    let { stub, revoker } = RpcStub.revocable(new CounterFactory());
+    return {
+      hanger: stub,
+      revoke: (message) => {
+        revoker.revoke(new RangeError(message));
+      },
+    };
+  }
+
+  // The next two methods test that a revoker cannot be used from a different IoContext than the
+  // one it was created in. Each top-level call on a WorkerEntrypoint runs in its own IoContext,
+  // so storing the revoker in a global and using it from a later call must fail.
+  async storeRevoker() {
+    let { stub, revoker } = RpcStub.revocable(new MyCounter(0));
+    stub[Symbol.dispose]();
+    globalRevoker = revoker;
+  }
+
+  async useStoredRevoker() {
+    globalRevoker.revoke();
   }
 
   async getADeeperObject(i) {
@@ -612,6 +667,23 @@ export class MyActor extends DurableObject {
 
   makePostAbortCallTester() {
     return new PostAbortCallTester(this.ctx);
+  }
+
+  // Revocable stubs handed out by a Durable Object. Unlike a WorkerEntrypoint, an actor's
+  // IoContext is long-lived and shared by all calls to the actor, so a revoker created during one
+  // call can be kept (here, in an instance map) and used during a later call. This is the
+  // "revoke one collaborator's session without restarting the object" pattern.
+  #revokers = new Map();
+
+  async makeRevocableCounter(name, i) {
+    let { stub, revoker } = RpcStub.revocable(new MyCounter(i));
+    this.#revokers.set(name, revoker);
+    return stub;
+  }
+
+  async revokeCounter(name, message) {
+    this.#revokers.get(name).revoke(new Error(message));
+    this.#revokers.delete(name);
   }
 }
 
@@ -1320,6 +1392,269 @@ export let disposal = {
       // require disposal to clean up its context!
       assert.strictEqual(counter.disposed, true);
     }
+  },
+};
+
+// Tests for RpcStub.revocable() with local (loopback) stubs.
+// (`RpcStub.revocable()` is currently experimental-only.)
+export let revocableStubs = {
+  async test(controller, env, ctx) {
+    // Basic revocation, with an app-provided reason.
+    {
+      let target = new MyCounter(3);
+      let { stub, revoker } = RpcStub.revocable(target);
+      assert.strictEqual(revoker.revoked, false);
+      assert.strictEqual(await stub.increment(2), 5);
+
+      revoker.revoke(new RangeError('gone fishing'));
+      assert.strictEqual(revoker.revoked, true);
+
+      // From the moment revoke() returns, callers of the stub are guaranteed to see rejections.
+      // (Note that revocation propagates to the underlying capability on the next event-loop
+      // turn, so a call made immediately after revoke() -- like this one -- may still reach the
+      // target object, even though the caller sees a rejection. Calls made after that turn are
+      // severed entirely; this is verified below.)
+      await assert.rejects(stub.increment(1), {
+        name: 'RangeError',
+        message: 'gone fishing',
+      });
+
+      // revoke() is idempotent: a second call (with a different reason) changes nothing.
+      revoker.revoke(new Error('a different reason'));
+      await assert.rejects(stub.increment(1), {
+        name: 'RangeError',
+        message: 'gone fishing',
+      });
+
+      // Revocation has fully propagated by now, so calls no longer reach the target at all.
+      let before = target.i;
+      await assert.rejects(stub.increment(1), {
+        name: 'RangeError',
+        message: 'gone fishing',
+      });
+      assert.strictEqual(target.i, before);
+
+      // The target object itself is unaffected by revocation; only stubs are broken.
+      assert.strictEqual(await target.increment(1), before + 1);
+
+      stub[Symbol.dispose]();
+    }
+
+    // Revoking with no reason produces the default error.
+    {
+      let { stub, revoker } = RpcStub.revocable(new MyCounter(0));
+      revoker.revoke();
+      await assert.rejects(stub.increment(1), {
+        name: 'Error',
+        message: 'RPC stub was revoked.',
+      });
+      stub[Symbol.dispose]();
+    }
+
+    // Revocation is transitive: stubs derived from the revocable stub (returned by its methods)
+    // die with it, whether awaited or pipelined.
+    {
+      let { stub, revoker } = RpcStub.revocable(new CounterFactory());
+
+      // Awaited result.
+      let counter = await stub.makeCounter(10);
+      assert.strictEqual(await counter.increment(5), 15);
+
+      // Pipelined result.
+      let pipelined = stub.makeCounter(20);
+      assert.strictEqual(await pipelined.increment(1), 21);
+
+      revoker.revoke(new Error('factory closed'));
+
+      await assert.rejects(counter.increment(1), {
+        name: 'Error',
+        message: 'factory closed',
+      });
+      await assert.rejects(pipelined.increment(1), {
+        name: 'Error',
+        message: 'factory closed',
+      });
+      await assert.rejects(stub.makeCounter(1), {
+        name: 'Error',
+        message: 'factory closed',
+      });
+
+      counter[Symbol.dispose]();
+      stub[Symbol.dispose]();
+    }
+
+    // dup()s of a revocable stub share its revocation.
+    {
+      let { stub, revoker } = RpcStub.revocable(new MyCounter(0));
+      let dup = stub.dup();
+
+      // Disposing the original does not affect the dup...
+      stub[Symbol.dispose]();
+      assert.strictEqual(await dup.increment(1), 1);
+
+      // ...but revoking breaks it.
+      revoker.revoke(new Error('all copies die'));
+      await assert.rejects(dup.increment(1), {
+        name: 'Error',
+        message: 'all copies die',
+      });
+      dup[Symbol.dispose]();
+    }
+
+    // Wrapping an existing stub: the original stub is unaffected by revocation.
+    {
+      let original = new RpcStub(new MyCounter(0));
+      let { stub, revoker } = RpcStub.revocable(original);
+
+      assert.strictEqual(await stub.increment(1), 1);
+      revoker.revoke(new Error('wrapped copy revoked'));
+      await assert.rejects(stub.increment(1), {
+        name: 'Error',
+        message: 'wrapped copy revoked',
+      });
+
+      // The original still works. (Use a relative check because the rejected call above may
+      // still have reached the target -- see the propagation-window comment earlier.)
+      let value = await original.increment(1);
+      assert.strictEqual(await original.increment(1), value + 1);
+
+      stub[Symbol.dispose]();
+      original[Symbol.dispose]();
+    }
+
+    // `using` disposal of the revoker revokes (with the default reason).
+    {
+      let { stub, revoker } = RpcStub.revocable(new MyCounter(0));
+      {
+        using r = revoker;
+        assert.strictEqual(await stub.increment(1), 1);
+        assert.strictEqual(r.revoked, false);
+      }
+      assert.strictEqual(revoker.revoked, true);
+      await assert.rejects(stub.increment(1), {
+        name: 'Error',
+        message: 'RPC stub was revoked.',
+      });
+      stub[Symbol.dispose]();
+    }
+
+    // The revoker itself cannot be sent over RPC.
+    {
+      let { stub, revoker } = RpcStub.revocable(new MyCounter(0));
+      await assert.rejects(env.MyService.incrementCounter(revoker, 1), {
+        name: 'DataCloneError',
+      });
+      revoker.revoke();
+      stub[Symbol.dispose]();
+    }
+
+    // Dropping the revoker without revoking does NOT revoke the stub, even after GC. (The
+    // revoker's fulfiller is handed off to the IoContext rather than destroyed, so GC is not
+    // observable.)
+    {
+      // Note: intentionally not binding the revoker, so it's collectable immediately.
+      let { stub } = RpcStub.revocable(new MyCounter(0));
+      gc();
+      assert.strictEqual(await stub.increment(1), 1);
+      stub[Symbol.dispose]();
+    }
+
+    // Only valid target types are accepted.
+    {
+      assert.throws(() => RpcStub.revocable(42), { name: 'TypeError' });
+      assert.throws(() => RpcStub.revocable(new NonRpcClass()), {
+        name: 'TypeError',
+        message:
+          'RpcStub.revocable() can only wrap plain objects, functions, RpcTarget ' +
+          'derivatives, and other RpcStubs.',
+      });
+    }
+  },
+};
+
+// Tests for RpcStub.revocable() where the revocable stub is passed to another worker over a
+// service binding: revoking on the server severs the client's copy, without disturbing the rest
+// of the RPC session.
+export let revocableStubsOverRpc = {
+  async test(controller, env, ctx) {
+    // Basic remote revocation.
+    {
+      let obj = await env.MyService.makeRevocableCounter(5);
+      assert.strictEqual(await obj.counter.increment(3), 8);
+      assert.strictEqual(await obj.isRevoked(), false);
+
+      await obj.revoke('access revoked');
+
+      assert.strictEqual(await obj.isRevoked(), true);
+      await assert.rejects(obj.counter.increment(1), {
+        name: 'RangeError',
+        message: 'access revoked',
+      });
+
+      // Note that isRevoked() succeeding after revocation already proves the revocation only
+      // broke the membraned stub, not the rest of the session.
+      obj[Symbol.dispose]();
+    }
+
+    // Revoking with no reason propagates the default error.
+    {
+      let obj = await env.MyService.makeRevocableCounter(0);
+      await obj.revoke();
+      await assert.rejects(obj.counter.increment(1), {
+        name: 'Error',
+        message: 'RPC stub was revoked.',
+      });
+      obj[Symbol.dispose]();
+    }
+
+    // Revocation cancels calls that are in flight when revoke() happens.
+    {
+      let obj = await env.MyService.makeRevocableHanger();
+      let hungCall = obj.hanger.hang();
+      await obj.revoke('canceled in flight');
+      await assert.rejects(hungCall, {
+        name: 'RangeError',
+        message: 'canceled in flight',
+      });
+      obj[Symbol.dispose]();
+    }
+
+    // A revoker can only be used from the IoContext in which it was created.
+    {
+      await env.MyService.storeRevoker();
+      await assert.rejects(env.MyService.useStoredRevoker(), {
+        message: /Cannot perform I\/O on behalf of a different request/,
+      });
+    }
+  },
+};
+
+// Tests the Durable Object pattern: the actor hands out revocable stubs and keeps the revokers,
+// then revokes one of them during a later call. This works because all calls to an actor share
+// its long-lived IoContext.
+export let revocableStubsFromActor = {
+  async test(controller, env, ctx) {
+    let actor = env.MyActor.get(env.MyActor.idFromName('revocation-test'));
+
+    let aliceCounter = await actor.makeRevocableCounter('alice', 10);
+    let bobCounter = await actor.makeRevocableCounter('bob', 20);
+
+    assert.strictEqual(await aliceCounter.increment(5), 15);
+    assert.strictEqual(await bobCounter.increment(5), 25);
+
+    await actor.revokeCounter('alice', 'collaborator removed');
+
+    // Alice's stub is broken...
+    await assert.rejects(aliceCounter.increment(1), {
+      name: 'Error',
+      message: 'collaborator removed',
+    });
+
+    // ...but Bob's independently-created stub is untouched.
+    assert.strictEqual(await bobCounter.increment(1), 26);
+
+    aliceCounter[Symbol.dispose]();
+    bobCounter[Symbol.dispose]();
   },
 };
 
