@@ -1312,6 +1312,18 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   kj::Promise<void> deleteQueueSignalTask;
   static kj::Promise<void> startDeleteQueueSignalTask(IoContext* context);
 
+  // True while a task scheduled by runInContextScope() to process pending cross-thread deletions
+  // is outstanding (i.e. has not yet taken ownership of the queued objects). Only touched from
+  // the IoContext's own thread. See runInContextScope() for why deletions are processed in a
+  // dedicated task rather than inline.
+  bool deleteQueueDeletionsScheduled = false;
+
+  // Destroy objects that were queued for deletion from other threads or request contexts. Runs
+  // as a dedicated task (see runInContextScope()) so that the destructors -- which can run
+  // arbitrary code, including canceling in-flight RPC calls -- never run inside an unrelated
+  // KJ event that they might transitively own.
+  kj::Promise<void> processDeleteQueue();
+
   friend class Finalizeable;
   friend class DeleteQueue;
   template <typename T>

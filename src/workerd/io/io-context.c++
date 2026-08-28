@@ -1347,14 +1347,23 @@ void IoContext::runInContextScope(Worker::LockType lockType,
           lock.getIsolate(), getPromiseContextTag(lock));
 
       {
-        // Handle any pending deletions that arrived while the worker was processing a different
-        // request.
+        // Check for pending deletions that arrived while the worker was processing a different
+        // request, and if there are any, schedule a task to process them.
+        //
+        // Note that we cannot simply destroy the queued objects inline here: their destructors
+        // can run arbitrary code, including canceling an in-flight capnp call that transitively
+        // owns the very KJ event that is currently executing. For example, a queued deletion
+        // could be an RPC pipeline holding the last reference to an in-progress call to a local
+        // capability, where this scope entry is that call's own first execution -- destroying
+        // the pipeline would then destroy the currently-firing event, tripping KJ's "Promise
+        // callback destroyed itself" assertion. Processing the deletions in a dedicated task is
+        // safe because nothing in the queue can own that task.
         auto l = deleteQueue.queue->crossThreadDeleteQueue.lockExclusive();
         auto& state = KJ_ASSERT_NONNULL(*l);
-        for (auto& object: state.queue) {
-          OwnedObjectList::unlink(*object);
+        if (!state.queue.empty() && !deleteQueueDeletionsScheduled) {
+          deleteQueueDeletionsScheduled = true;
+          tasks.add(processDeleteQueue());
         }
-        state.queue.clear();
       }
 
       func(lock);
@@ -1679,6 +1688,29 @@ jsg::JsObject IoContext::getPromiseContextTag(jsg::Lock& js) {
     promiseContextTag = jsg::JsRef(js, js.opaque(kj::mv(deferral)));
   }
   return KJ_REQUIRE_NONNULL(promiseContextTag).getHandle(js);
+}
+
+kj::Promise<void> IoContext::processDeleteQueue() {
+  // Note that we deliberately do NOT use IoContext::run() here: run() requires a current
+  // IncomingRequest and, for actors, waits on the input gate -- but deletions must be processed
+  // even between requests (e.g. while an actor sits idle) and even if the input gate is broken
+  // or the context was aborted, just like the old inline processing in runInContextScope() did.
+  // All we actually need is the isolate lock and the context scope.
+  Worker::AsyncLock asyncLock = co_await worker->takeAsyncLockWithoutRequest(nullptr);
+  runInContextScope(asyncLock, kj::none, [this](Worker::Lock&) {
+    kj::Vector<OwnedObject*> toDelete;
+    {
+      auto l = deleteQueue.queue->crossThreadDeleteQueue.lockExclusive();
+      auto& state = KJ_ASSERT_NONNULL(*l);
+      toDelete = kj::mv(state.queue);
+      // Clear the flag before destroying anything, so that if more deletions arrive while the
+      // destructors below run, a later scope entry schedules a fresh task for them.
+      deleteQueueDeletionsScheduled = false;
+    }
+    for (auto& object: toDelete) {
+      OwnedObjectList::unlink(*object);
+    }
+  });
 }
 
 kj::Promise<void> IoContext::startDeleteQueueSignalTask(IoContext* context) {
