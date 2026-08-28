@@ -968,6 +968,42 @@ void JsRpcStub::dispose() {
   }
 }
 
+JsRpcRevoker::~JsRpcRevoker() noexcept(false) {
+  KJ_IF_SOME(f, fulfiller) {
+    // The revoker was GC'ed without revoke() ever being called. Destroying the fulfiller now
+    // would reject the membrane's promise, i.e. revoke the stub -- making GC observable. We'd
+    // rather not do that, so pass the fulfiller off to the I/O context, to be dropped only when
+    // the context itself shuts down (at which point all of the stubs are dead anyway).
+    kj::mv(f).deferGcToContext();
+  }
+}
+
+void JsRpcRevoker::revoke(jsg::Lock& js, jsg::Optional<jsg::JsValue> reason) {
+  KJ_IF_SOME(f, fulfiller) {
+    kj::Exception exception = [&]() {
+      KJ_IF_SOME(r, reason) {
+        // Tunnel the app's exception so remote holders see it verbatim.
+        return js.exceptionToKj(r);
+      } else {
+        return JSG_KJ_EXCEPTION(FAILED, Error, "RPC stub was revoked.");
+      }
+    }();
+
+    // Note that dereferencing the IoOwn here throws if we're in the wrong IoContext, before any
+    // state is modified, so an errant cross-context revoke() leaves the revoker intact.
+    f->reject(kj::mv(exception));
+    fulfiller = kj::none;
+  }
+}
+
+bool JsRpcRevoker::getRevoked() {
+  return fulfiller == kj::none;
+}
+
+void JsRpcRevoker::dispose(jsg::Lock& js) {
+  revoke(js, kj::none);
+}
+
 void RpcStubDisposalGroup::disownAll() {
   for (auto& stub: list) {
     stub.disposalGroup = kj::none;
@@ -2070,6 +2106,37 @@ jsg::Ref<JsRpcStub> JsRpcStub::constructor(jsg::Lock& js, jsg::JsObject object) 
 
 bool JsRpcStub::shouldImplicitlyStubify(jsg::Lock& js, jsg::JsObject object) {
   return object.isInstanceOf<JsRpcTarget>(js) || isFunctionForRpc(js, object);
+}
+
+JsRpcStub::RevocablePair JsRpcStub::revocable(
+    jsg::Lock& js, kj::OneOf<jsg::Ref<JsRpcStub>, jsg::JsObject> target) {
+  auto& ioctx = IoContext::current();
+
+  rpc::JsRpcTarget::Client cap = [&]() -> rpc::JsRpcTarget::Client {
+    KJ_SWITCH_ONEOF(target) {
+      KJ_CASE_ONEOF(stub, jsg::Ref<JsRpcStub>) {
+        return stub->getClient();
+      }
+      KJ_CASE_ONEOF(object, jsg::JsObject) {
+        bool allowInstanceProperties = JSG_REQUIRE_NONNULL(checkStubType(js, object), TypeError,
+            "RpcStub.revocable() can only wrap plain objects, functions, RpcTarget derivatives, "
+            "and other RpcStubs.");
+        return kj::heap<TransientJsRpcTarget>(js, ioctx, object, allowInstanceProperties);
+      }
+    }
+    KJ_UNREACHABLE;
+  }();
+
+  // Wrap the capability in a membrane which revokes when `paf.promise` rejects. The membrane also
+  // wraps every capability that later passes out through the stub (e.g. stubs embedded in call
+  // results), which is what makes revocation transitive.
+  auto paf = kj::newPromiseAndFulfiller<void>();
+  cap = capnp::membrane(kj::mv(cap), kj::refcounted<RevokerMembrane>(kj::mv(paf.promise)));
+
+  return {
+    .stub = js.alloc<JsRpcStub>(ioctx.addObject(kj::heap(kj::mv(cap)))),
+    .revoker = js.alloc<JsRpcRevoker>(ioctx.addObject(kj::mv(paf.fulfiller))),
+  };
 }
 
 void JsRpcTarget::serialize(jsg::Lock& js, jsg::Serializer& serializer) {

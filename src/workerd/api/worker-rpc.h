@@ -16,6 +16,7 @@
 
 #include <workerd/api/js-readable-stream.h>
 #include <workerd/api/js-writable-stream.h>
+#include <workerd/io/compatibility-date.capnp.h>
 #include <workerd/io/io-context.h>
 #include <workerd/io/trace.h>
 #include <workerd/io/worker-interface.capnp.h>
@@ -425,6 +426,57 @@ class JsRpcProperty: public JsRpcClientProvider {
   }
 };
 
+// The revoke authority for a stub created by `RpcStub.revocable()`. Calling `revoke()` breaks
+// the associated stub -- along with every capability derived from it, including dup()s of the
+// stub, stubs obtained from its call results (whether awaited or pipelined), and copies of any
+// of those that were passed on to other isolates -- and cancels calls that are still in flight
+// through it. The revoker is intentionally a separate object from the stub itself, so that
+// revoke authority can be retained while the stub is handed out.
+//
+// Revocation is implemented with a capnp membrane (see `RevokerMembrane` in
+// util/completion-membrane.h): every capability that flows out through the revocable stub is
+// transparently wrapped in the same membrane, which is what makes revocation transitive.
+//
+// Note that revoking is not the same as disposing: revocation breaks the capability for everyone
+// downstream, while dispose() merely releases the caller's own reference. The revocable stub
+// still needs to be disposed as usual.
+class JsRpcRevoker: public jsg::Object {
+ public:
+  JsRpcRevoker(IoOwn<kj::PromiseFulfiller<void>> fulfiller): fulfiller(kj::mv(fulfiller)) {}
+  ~JsRpcRevoker() noexcept(false);
+
+  // Revoke the associated stub. `reason`, if given, becomes the exception that the stub (and all
+  // capabilities derived from it) will throw from this point on; it propagates to remote holders
+  // of derived capabilities the next time they try to use them. Idempotent: calling revoke() on
+  // an already-revoked revoker does nothing.
+  //
+  // Callers of the stub are guaranteed to see rejections from the moment revoke() returns.
+  // However, the membrane itself is severed on the next event-loop turn, so a call that is
+  // already in flight -- or made in the same turn as revoke() -- may still execute against the
+  // target object even though its caller sees a rejection. In other words, revoke() removes
+  // authorization; it does not guarantee that the last-moment call never ran.
+  void revoke(jsg::Lock& js, jsg::Optional<jsg::JsValue> reason);
+
+  bool getRevoked();
+
+  // `using` disposal revokes with a default reason.
+  void dispose(jsg::Lock& js);
+
+  JSG_RESOURCE_TYPE(JsRpcRevoker) {
+    JSG_METHOD(revoke);
+    JSG_READONLY_PROTOTYPE_PROPERTY(revoked, getRevoked);
+    JSG_DISPOSE(dispose);
+  }
+
+ private:
+  // Rejecting this fulfiller revokes the membrane. Nulled out once revoked.
+  //
+  // The `IoOwn` means the revoker can only be used within the IoContext where the revocable stub
+  // was created (attempting otherwise produces a clean error). Note that a revoker is NOT
+  // serializable: revoke authority stays in the isolate that created it.
+  kj::Maybe<IoOwn<kj::PromiseFulfiller<void>>> fulfiller;
+};
+
 // A JsRpcStub object forwards JS method calls to the remote Worker/Durable Object over RPC.
 // Since methods are not known until runtime, JsRpcStub doesn't define any JS methods.
 // Instead, we use JSG_WILDCARD_PROPERTY to intercept property accesses of names that are not known
@@ -491,16 +543,37 @@ class JsRpcStub: public JsRpcClientProvider {
   // `new RpcStub(obj)` in application code, but they are not *implicitly* stubified.
   static bool shouldImplicitlyStubify(jsg::Lock& js, jsg::JsObject object);
 
+  // Result of `RpcStub.revocable()`: the revocable stub plus its revoke authority.
+  struct RevocablePair {
+    jsg::Ref<JsRpcStub> stub;
+    jsg::Ref<JsRpcRevoker> revoker;
+    JSG_STRUCT(stub, revoker);
+  };
+
+  // Like `constructor()`, creates a stub pointing at the given target, but the returned stub is
+  // revocable: calling `revoker.revoke(reason)` breaks the stub and, transitively, every
+  // capability derived from it (see JsRpcRevoker). The target may also be an existing RpcStub, in
+  // which case the revocable stub is a new stub sharing the same target -- like `dup()`, except
+  // revocable -- and the original stub is unaffected by revocation.
+  static RevocablePair revocable(
+      jsg::Lock& js, kj::OneOf<jsg::Ref<JsRpcStub>, jsg::JsObject> target);
+
   // Call the stub itself as a function.
   jsg::Ref<JsRpcPromise> call(const v8::FunctionCallbackInfo<v8::Value>& args);
 
   kj::Maybe<jsg::Ref<JsRpcProperty>> getRpcMethod(jsg::Lock& js, kj::String name);
 
-  JSG_RESOURCE_TYPE(JsRpcStub) {
+  JSG_RESOURCE_TYPE(JsRpcStub, CompatibilityFlags::Reader flags) {
     JSG_METHOD(dup);
     JSG_DISPOSE(dispose);
     JSG_CALLABLE(call);
     JSG_WILDCARD_PROPERTY(getRpcMethod);
+
+    if (flags.getWorkerdExperimental()) {
+      // TODO(soon): `revocable()` is experimental-only pending API review; promote to a compat
+      //   flag (or no gate at all) once the API shape is settled.
+      JSG_STATIC_METHOD(revocable);
+    }
   }
 
   void serialize(jsg::Lock& js, jsg::Serializer& serializer);
@@ -658,6 +731,7 @@ class JsRpcSessionCustomEvent final: public WorkerInterface::CustomEvent {
 };
 
 #define EW_WORKER_RPC_ISOLATE_TYPES                                                                \
-  api::JsRpcPromise, api::JsRpcProperty, api::JsRpcStub, api::JsRpcTarget
+  api::JsRpcPromise, api::JsRpcProperty, api::JsRpcStub, api::JsRpcStub::RevocablePair,            \
+      api::JsRpcRevoker, api::JsRpcTarget
 
 };  // namespace workerd::api
