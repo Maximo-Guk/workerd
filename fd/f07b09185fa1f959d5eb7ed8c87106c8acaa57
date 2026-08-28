@@ -1,0 +1,21 @@
+types/generated-snapshot/experimental/index.d.ts
+  s_1dac6d56438157::t_900c0390cc8bfb 12114
+types/generated-snapshot/experimental/index.ts
+  s_1dac6d56438157::t_c933d9b2cc974f 12128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fdf07b09185fa1f959d5eb7ed8c87106c8acaa57",
+  "prompts": {},
+  "sessions": {
+    "s_1dac6d56438157": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "21fbf310-06f3-4616-af34-aee2cfc35de6",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    }
+  }
+}
