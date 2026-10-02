@@ -1,0 +1,33 @@
+src/workerd/io/io-channels.h
+  s_d1bbaf80186abb::t_0204ffd68f0d2b 148-162,216-219
+src/workerd/io/io-context.c++
+  s_d1bbaf80186abb::t_bfe2ab919da770 13,223-224,231,234-237,295,1213,1350-1397
+src/workerd/io/io-context.h
+  s_d1bbaf80186abb::t_f1f84f1d0de905 117-118,207-211,223,1135-1169
+src/workerd/io/worker-entrypoint.c++
+  s_d1bbaf80186abb::t_d49da1dfe00d49 74-75,129-130,250-251,277-278,314-315,346,486-490,506,515-516,796,802-803,806,944-949,953,1027,1030-1031,1035-1036,1131-1132,1137,1209-1210,1216
+src/workerd/io/worker-entrypoint.h
+  s_d1bbaf80186abb::t_e5594719f7e438 62-65
+src/workerd/io/worker.c++
+  s_d1bbaf80186abb::t_63e9d3a49ca07c 1160-1161,1654,2579-2582,4020-4021,4036,4041-4043,4063-4064,4066
+src/workerd/io/worker.h
+  s_d1bbaf80186abb::t_98f71ba3882efb 583,807-809,1032-1035,1175-1177
+src/workerd/util/autogate.h
+  s_d1bbaf80186abb::t_3beeeda4b11089 126-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1f564b9b69825a88d50f614aea9d30dcf8bbac1f",
+  "prompts": {},
+  "sessions": {
+    "s_d1bbaf80186abb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bc76a637-aa82-4154-bd22-48bced9fd203",
+        "model": "claude-odango-eap"
+      },
+      "human_author": "Maximo Guk <maximo@cloudflare.com>"
+    }
+  }
+}
