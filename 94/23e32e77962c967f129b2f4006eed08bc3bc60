@@ -1,0 +1,34 @@
+src/workerd/util/autogate.h
+  s_d1bbaf80186abb::t_12a51b5b770e97 126-132
+src/workerd/io/worker-entrypoint.h
+  s_d1bbaf80186abb::t_9108c290f0d3bb 62-65
+src/workerd/io/worker.h
+  s_d1bbaf80186abb::t_f98426641af75c 583,807-809,1032-1035,1175-1177
+src/workerd/io/io-channels.h
+  s_d1bbaf80186abb::t_7592efdc197203 148-162,216-219
+src/workerd/io/worker.c++
+  s_d1bbaf80186abb::t_cfd5a8aff391a5 1160-1161,1654,2579-2582,4020-4021,4036,4041-4043,4063-4064
+  s_d1bbaf80186abb::t_d732a01a794e8e 4065,4067,4111-4112
+src/workerd/io/worker-entrypoint.c++
+  s_d1bbaf80186abb::t_3a345a72ed4da4 74-75,129-130,250-251,277-278,314-315,346,486-490,506,515-516,796,802-803,806,944-949,953,1027,1030-1031,1035-1036,1131-1132,1137,1209-1210,1216
+src/workerd/io/io-context.c++
+  s_d1bbaf80186abb::t_022f532d0042eb 13,223-224,231,234-237,295,1213,1350-1397
+src/workerd/io/io-context.h
+  s_d1bbaf80186abb::t_179b0fd53003f1 117-118,207-211,223,1135-1169
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9423e32e77962c967f129b2f4006eed08bc3bc60",
+  "prompts": {},
+  "sessions": {
+    "s_d1bbaf80186abb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bc76a637-aa82-4154-bd22-48bced9fd203",
+        "model": "claude-odango-eap"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    }
+  }
+}
