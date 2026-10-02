@@ -734,13 +734,15 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server, public kj::R
       kj::Maybe<Worker::VersionInfo> versionInfo,
       Frankenvalue props,
       kj::Own<kj::PromiseFulfiller<void>> doneFulfiller,
-      bool isDynamicDispatch)
+      bool isDynamicDispatch,
+      kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin)
       : weakIoContext(ioContext.getWeakRef()),
         entrypointNamePtr(kj::mv(entrypointNamePtr)),
         versionInfo(kj::mv(versionInfo)),
         props(kj::mv(props)),
         doneFulfiller(kj::mv(doneFulfiller)),
-        isDynamicDispatch(isDynamicDispatch) {}
+        isDynamicDispatch(isDynamicDispatch),
+        origin(kj::mv(origin)) {}
 
   KJ_DISALLOW_COPY_AND_MOVE(TailStreamTarget);
   ~TailStreamTarget() {
@@ -774,6 +776,9 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server, public kj::R
         ioContext.run([self = addRefToThis(), sharedResults = sharedResults.addRef(), reportContext,
                           ownReportContext = ownReportContext->addRef()](
                           Worker::Lock& lock, IoContext& ioContext) mutable -> kj::Promise<void> {
+      IoContext::AsyncOriginScope originScope =
+          ioContext.makeAsyncOriginScope(lock, mapAddRef(self->origin));
+
       auto params = reportContext.getParams();
       KJ_ASSERT(params.hasEvents(), "Events are required.");
       auto eventReaders = params.getEvents();
@@ -1077,6 +1082,10 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server, public kj::R
   kj::Own<kj::PromiseFulfiller<void>> doneFulfiller;
   bool isDynamicDispatch;
 
+  // The origin of the incoming request that opened this tail session. Every report runs the tail
+  // handler with it, since reports arrive after other requests may have become current.
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin;
+
   // The maybeHandler will be empty until we receive and process the
   // onset event.
   kj::Maybe<ReverseIoOwn<jsg::JsRef<jsg::JsValue>>> maybeHandler;
@@ -1102,8 +1111,9 @@ kj::Promise<WorkerInterface::CustomEvent::Result> TailStreamCustomEvent::run(
   incomingRequest->delivered();
 
   auto [donePromise, doneFulfiller] = kj::newPromiseAndFulfiller<void>();
-  capFulfiller->fulfill(kj::refcounted<TailStreamTarget>(ioContext, kj::mv(entrypointName),
-      kj::mv(versionInfo), kj::mv(props), kj::mv(doneFulfiller), isDynamicDispatch));
+  capFulfiller->fulfill(
+      kj::refcounted<TailStreamTarget>(ioContext, kj::mv(entrypointName), kj::mv(versionInfo),
+          kj::mv(props), kj::mv(doneFulfiller), isDynamicDispatch, incomingRequest->getOrigin()));
 
   donePromise = donePromise.attach(ioContext.registerPendingEvent());
 

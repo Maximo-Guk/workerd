@@ -64,10 +64,13 @@ kj::Promise<WorkerInterface::CustomEvent::Result> HibernatableWebSocketCustomEve
       KJ_REQUIRE_NONNULL(context.getActor()), eventParameters.websocketId);
 
   try {
+    auto origin = incomingRequest->getOrigin();
     co_await context.run(
         [entrypointName = entrypointName, eventParameters = kj::mv(eventParameters),
-            versionInfo = kj::mv(versionInfo), props = kj::mv(props),
-            isDynamicDispatch](Worker::Lock& lock, IoContext& context) mutable {
+            versionInfo = kj::mv(versionInfo), props = kj::mv(props), isDynamicDispatch,
+            origin = kj::mv(origin)](Worker::Lock& lock, IoContext& context) mutable {
+      IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
+
       KJ_SWITCH_ONEOF(eventParameters.eventType) {
         KJ_CASE_ONEOF(text, HibernatableSocketParams::Text) {
           markHibernatableWebSocketReceive(context);

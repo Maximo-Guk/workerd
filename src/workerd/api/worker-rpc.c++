@@ -424,6 +424,15 @@ kj::Maybe<IoOwn<TraceContextParent>> ownOriginatingCall(
   return kj::none;
 }
 
+// Takes the subrequest origin that is current in `ioCtx`, for a capability exported from it whose
+// later calls should run under that origin.
+kj::Maybe<IoOwn<IoChannelFactory::SubrequestOrigin>> ownCurrentOrigin(IoContext& ioCtx) {
+  KJ_IF_SOME(origin, ioCtx.getCurrentOrigin()) {
+    return ioCtx.addObject(kj::mv(origin));
+  }
+  return kj::none;
+}
+
 }  // namespace
 
 enum class JsRpcOperation {
@@ -2074,6 +2083,9 @@ class JsRpcTargetBase: public rpc::JsRpcTarget::Server {
   virtual kj::LiteralStringConst getTargetKind() = 0;
   virtual kj::Maybe<TraceContextParent&> tryGetOriginatingCall() = 0;
 
+  // Returns a new reference to the subrequest origin that a call's JavaScript runs under, if any.
+  virtual kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> getCallOrigin() = 0;
+
   kj::Promise<void> callImpl(Worker::Lock& lock, IoContext& ctx, CallContext callContext) {
     jsg::Lock& js = lock;
     auto params = callContext.getParams();
@@ -2306,6 +2318,7 @@ class JsRpcTargetBase: public rpc::JsRpcTarget::Server {
         ctx.makeAsyncTraceScope(lock, kj::mv(traceParent));
     jsg::AsyncContextFrame::StorageScope userTraceScope =
         ctx.makeUserAsyncTraceScope(lock, kj::mv(userTraceParent));
+    IoContext::AsyncOriginScope originScope = ctx.makeAsyncOriginScope(lock, getCallOrigin());
     return dispatch().attach(kj::mv(jsRpcCallSpan));
   }
 
@@ -2592,6 +2605,7 @@ class TransientJsRpcTarget final: public JsRpcTargetBase {
       kj::Maybe<TraceContextParent> originatingCall)
       : JsRpcTargetBase(ioCtx, MayOutliveIncomingRequest()),
         originatingCall(ownOriginatingCall(ioCtx, kj::mv(originatingCall))),
+        origin(ownCurrentOrigin(ioCtx)),
         handles(ioCtx.addObjectReverse(kj::heap<Handles>(js, object))),
         allowInstanceProperties(allowInstanceProperties.toBool()) {
     // Check for the existence of a dispose function now so that the destructor doesn't have to
@@ -2612,6 +2626,7 @@ class TransientJsRpcTarget final: public JsRpcTargetBase {
       kj::Vector<kj::Own<void>> stubDisposers,
       AllowInstanceProperties allowInstanceProperties = AllowInstanceProperties::NO)
       : JsRpcTargetBase(ioCtx, MayOutliveIncomingRequest()),
+        origin(ownCurrentOrigin(ioCtx)),
         handles(ioCtx.addObjectReverse(kj::heap<Handles>(js, object))),
         disposeFulfiller(addDisposeTask(js, ioCtx, object, kj::mv(dispose), kj::mv(stubDisposers))),
         allowInstanceProperties(allowInstanceProperties.toBool()) {}
@@ -2634,6 +2649,11 @@ class TransientJsRpcTarget final: public JsRpcTargetBase {
   // The caller-side jsRpcCall that exported this capability, so that re-entrant calls back into
   // this target nest under it. Held via IoOwn because the target may outlive the IoContext.
   kj::Maybe<IoOwn<TraceContextParent>> originatingCall;
+
+  // The subrequest origin that was current when this capability was exported. Calls to it arrive
+  // outside of any incoming event's async context, so they run under this origin instead. Held
+  // via IoOwn because the target may outlive the IoContext.
+  kj::Maybe<IoOwn<IoChannelFactory::SubrequestOrigin>> origin;
 
   struct Handles {
     jsg::JsRef<jsg::JsObject> object;
@@ -2696,6 +2716,13 @@ class TransientJsRpcTarget final: public JsRpcTargetBase {
   kj::Maybe<TraceContextParent&> tryGetOriginatingCall() override {
     KJ_IF_SOME(parent, originatingCall) {
       return *parent;
+    }
+    return kj::none;
+  }
+
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> getCallOrigin() override {
+    KJ_IF_SOME(o, origin) {
+      return kj::addRef(*o);
     }
     return kj::none;
   }
@@ -3156,7 +3183,8 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
       Frankenvalue props,
       kj::Maybe<kj::String> wrapperModule,
       kj::Maybe<kj::Own<BaseTracer>> tracer,
-      bool isDynamicDispatch)
+      bool isDynamicDispatch,
+      kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin)
       : JsRpcTargetBase(ioCtx, CantOutliveIncomingRequest()),
         ioCtx(ioCtx),
         metrics(kj::mv(metrics)),
@@ -3167,7 +3195,8 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
         props(kj::mv(props)),
         wrapperModule(kj::mv(wrapperModule)),
         tracer(kj::mv(tracer)),
-        isDynamicDispatch(isDynamicDispatch) {}
+        isDynamicDispatch(isDynamicDispatch),
+        origin(kj::mv(origin)) {}
 
   // Override call() to emit the Return event when the top-level RPC call completes.
   // This marks when the handler returned a value, NOT when all data has been streamed or all
@@ -3270,6 +3299,9 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
   kj::Maybe<kj::Own<BaseTracer>> tracer;
   bool isDynamicDispatch;
 
+  // The origin of the incoming request that opened this session.
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin;
+
   bool isReservedName(kj::StringPtr name) override {
     if (  // "fetch" and "connect" are treated specially on entrypoints.
         name == "fetch" || name == "connect" ||
@@ -3296,6 +3328,10 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
 
   kj::Maybe<TraceContextParent&> tryGetOriginatingCall() override {
     return kj::none;
+  }
+
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> getCallOrigin() override {
+    return mapAddRef(origin);
   }
 
   void maybeSetJsRpcInfo(IoContext& ctx, const kj::ConstString& methodNameForTrace) override {
@@ -3378,7 +3414,8 @@ kj::Promise<WorkerInterface::CustomEvent::Result> JsRpcSessionCustomEvent::run(
 
   EntrypointJsRpcTarget target(ioctx, kj::addRef(incomingRequest->getMetrics()), entrypointName,
       kj::mv(versionInfo), kj::mv(props), kj::mv(wrapperModule),
-      mapAddRef(incomingRequest->getWorkerTracer()), isDynamicDispatch);
+      mapAddRef(incomingRequest->getWorkerTracer()), isDynamicDispatch,
+      incomingRequest->getOrigin());
   capnp::RevocableServer<rpc::JsRpcTarget> revocableTarget(target);
 
   KJ_DEFER({

@@ -715,13 +715,15 @@ void sendTracesToExportedHandler(kj::Own<IoContext::IncomingRequest> incomingReq
   // wait around for async resolution. We're relying on `drain()` below to persist `incomingRequest`
   // and its members until this task completes.
   auto entrypointName = mapCopyString(entrypointNamePtr);
+  auto origin = incomingRequest->getOrigin();
   context.addWaitUntil(
       context
           .run([nonEmptyTraces = kj::mv(nonEmptyTraces), entrypointName = kj::mv(entrypointName),
-                   versionInfo = kj::mv(versionInfo), props = kj::mv(props),
-                   isDynamicDispatch](Worker::Lock& lock, IoContext& context) mutable {
+                   versionInfo = kj::mv(versionInfo), props = kj::mv(props), isDynamicDispatch,
+                   origin = kj::mv(origin)](Worker::Lock& lock, IoContext& context) mutable {
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
     jsg::AsyncContextFrame::StorageScope userTraceScope = context.makeUserAsyncTraceScope(lock);
+    IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
 
     auto handler = lock.getExportedHandler(
         entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor(), isDynamicDispatch);

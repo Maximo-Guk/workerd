@@ -708,10 +708,11 @@ kj::Promise<WorkerInterface::CustomEvent::Result> QueueCustomEvent::run(
   auto runProm = context.run(
       [this, entrypointName = entrypointName, queueEvent = kj::addRef(*queueEventHolder),
           &metrics = incomingRequest->getMetrics(), versionInfo = kj::mv(versionInfo),
-          props = kj::mv(props),
-          isDynamicDispatch](Worker::Lock& lock, IoContext& context) mutable -> kj::Promise<void> {
+          props = kj::mv(props), isDynamicDispatch, origin = incomingRequest->getOrigin()](
+          Worker::Lock& lock, IoContext& context) mutable -> kj::Promise<void> {
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
     jsg::AsyncContextFrame::StorageScope userTraceScope = context.makeUserAsyncTraceScope(lock);
+    IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
 
     auto& typeHandler = lock.getWorker().getIsolate().getApi().getQueueTypeHandler(lock);
     // Pass an owning IoOwn<QueueEventResult> (via addRef) so that QueueEventResult stays
