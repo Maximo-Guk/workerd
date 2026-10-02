@@ -114,7 +114,8 @@ class IoContext_IncomingRequest final {
       kj::Maybe<kj::Own<BaseTracer>> workerTracer,
       kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
       kj::Maybe<kj::Own<AccessInfo>> accessInfo = kj::none,
-      kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory = kj::none);
+      kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory = kj::none,
+      kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin = kj::none);
   KJ_DISALLOW_COPY_AND_MOVE(IoContext_IncomingRequest);
   ~IoContext_IncomingRequest() noexcept(false);
 
@@ -203,6 +204,11 @@ class IoContext_IncomingRequest final {
     return accessInfo.map([](kj::Own<AccessInfo>& p) -> AccessInfo& { return *p; });
   }
 
+  // Returns a new reference to the origin the embedder supplied for this request, if any. This
+  // is what event delivery passes to IoContext::makeAsyncOriginScope() before running the
+  // request's JavaScript.
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> getOrigin();
+
   // The invocation span context is a unique identifier for a specific
   // worker invocation.
   tracing::InvocationSpanContext& getInvocationSpanContext();
@@ -214,6 +220,7 @@ class IoContext_IncomingRequest final {
   kj::Rc<IoChannelFactory> ioChannelFactory;
   kj::Maybe<kj::Own<AccessInfo>> accessInfo;
   kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory;
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin;
 
   // Root user trace span for this request. Populated during delivered() via
   // BaseTracer::makeUserRequestSpan(); otherwise a null SpanParent. The tracer it references
@@ -1124,6 +1131,41 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   // information from the current async context, if available.
   SpanParent getCurrentTraceSpan();
   SpanParent getCurrentUserTraceSpan();
+
+  // While alive, makes `origin` the subrequest origin of the current async context, so that
+  // getCurrentOrigin() returns it to JavaScript run within the scope and to the async work that
+  // JavaScript starts (promise continuations, timers, awaitIo() callbacks). Has no effect when
+  // `origin` is none or when the SUBREQUEST_ORIGIN autogate is off.
+  //
+  // Entering the scope changes the isolate's current async context and leaving it restores the
+  // previous one, so a scope must be a local variable of the synchronous code that enters
+  // JavaScript: declared after any trace scopes, and never moved to the heap, into a lambda
+  // capture, or across a co_await.
+  class AsyncOriginScope final {
+   public:
+    AsyncOriginScope(IoContext& context,
+        Worker::Lock& lock,
+        kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin);
+    KJ_DISALLOW_COPY_AND_MOVE(AsyncOriginScope);
+
+   private:
+    kj::Maybe<jsg::AsyncContextFrame::StorageScope> scope;
+  };
+
+  // Returns an AsyncOriginScope for `origin`. Each site that delivers an event to JavaScript passes
+  // the origin of the IncomingRequest it is delivering (IncomingRequest::getOrigin()), which is
+  // not necessarily the current incoming request by the time the JavaScript runs.
+  [[nodiscard]] AsyncOriginScope makeAsyncOriginScope(
+      Worker::Lock& lock, kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin);
+
+  // Returns a new reference to the origin that a subrequest started by the calling code carries.
+  // If called while the JS lock is held and the current async context carries an origin belonging
+  // to this IoContext, that origin is returned. Otherwise (no async context, no origin in it, an
+  // origin captured under a different IoContext, or the JS lock is not held) this returns the
+  // origin of the current incoming request, if it has one. Never throws.
+  //
+  // Returns none when the SUBREQUEST_ORIGIN autogate is off.
+  kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> getCurrentOrigin();
 
   // Returns the invocation's traceId/invocationId paired with the currently-active user
   // span's spanId (as pushed by `ctx.tracing.enterSpan`), falling back to the invocation

@@ -59,6 +59,9 @@ kj::Own<WorkerInterface> newWorkerEntrypoint(ThreadContext& threadContext,
     // `allow_irrevocable_stub_storage` compat flag enabled and rejects the request otherwise.
     Persistent fromPersistentStub = Persistent::NO,
     // Address of the client as IP:port on whose behalf this event is being delivered.
-    kj::Maybe<kj::String> clientAddress = kj::none);
+    kj::Maybe<kj::String> clientAddress = kj::none,
+    // Identifies this event to the embedder on the subrequests made by code that descends from
+    // it. See `IoChannelFactory::SubrequestOrigin`.
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin = kj::none);
 
 }  // namespace workerd

@@ -123,7 +123,13 @@ namespace workerd::util {
      canceled or released before EOF, and the origin's pump cancels the source (running its       \
      cancel algorithm with the receiver's reason). When disabled, neither side participates and    \
      the origin learns of the loss only when its next write fails. */                             \
-  V(JSRPC_READABLE_CANCEL_PROPAGATION)
+  V(JSRPC_READABLE_CANCEL_PROPAGATION)                                                             \
+  /* Attribute each outgoing subrequest to the incoming event that the code making it descends     \
+     from. The embedder may supply an opaque IoChannelFactory::SubrequestOrigin with each incoming \
+     event; it is carried in the async context of the JavaScript the event runs, and is attached   \
+     to the metadata of every subrequest made from that async context. When disabled, origins      \
+     are neither recorded nor attached, and the embedder sees no origin on any subrequest. */      \
+  V(SUBREQUEST_ORIGIN)
 // clang-format on
 // --------------------------------------------------------------------------------------
 

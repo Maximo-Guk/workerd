@@ -10,6 +10,7 @@
 #include <workerd/io/worker.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/setup.h>
+#include <workerd/util/autogate.h>
 #include <workerd/util/own-util.h>
 #include <workerd/util/sentry.h>
 #include <workerd/util/thread-scopes.h>
@@ -219,14 +220,20 @@ IoContext::IncomingRequest::IoContext_IncomingRequest(kj::Own<IoContext> context
     kj::Maybe<kj::Own<BaseTracer>> workerTracer,
     kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
     kj::Maybe<kj::Own<AccessInfo>> accessInfo,
-    kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory)
+    kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory,
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin)
     : context(kj::mv(contextParam)),
       metrics(kj::mv(metricsParam)),
       workerTracer(kj::mv(workerTracer)),
       ioChannelFactory(kj::mv(ioChannelFactoryParam)),
       accessInfo(kj::mv(accessInfo)),
       selfTokenFactory(kj::mv(selfTokenFactory)),
+      origin(kj::mv(origin)),
       maybeTriggerInvocationSpan(kj::mv(maybeTriggerInvocationSpan)) {}
+
+kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> IoContext::IncomingRequest::getOrigin() {
+  return mapAddRef(origin);
+}
 
 tracing::InvocationSpanContext& IoContext::IncomingRequest::getInvocationSpanContext() {
   // Creating a new InvocationSpanContext can be a bit expensive since it needs to
@@ -285,7 +292,7 @@ void IoContext::IncomingRequest::delivered(kj::SourceLocation location) {
     context->limitEnforcer->topUpActor();
 
     // Run the Actor's constructor if it hasn't been run already.
-    a.ensureConstructed(*context);
+    a.ensureConstructed(*context, getOrigin());
 
     // Record a new incoming request to actor metrics.
     a.getMetrics().startRequest();
@@ -1203,6 +1210,7 @@ kj::Own<WorkerInterface> IoContext::getSubrequestChannelImpl(uint channel,
     .parentSpan = tracing.getInternalSpanParent(),
     .userSpanParent = kj::mv(propagatedUserSpanParent),
     .featureFlagsForFl = mapCopyString(worker->getIsolate().getFeatureFlagsForFl()),
+    .origin = getCurrentOrigin(),
   };
 
   auto client = channelFactory.startSubrequest(channel, kj::mv(metadata));
@@ -1337,6 +1345,54 @@ SpanParent IoContext::getCurrentUserTraceSpan() {
     }
   }
   return getCurrentIncomingRequest().getRootUserTraceSpan();
+}
+
+IoContext::AsyncOriginScope::AsyncOriginScope(IoContext& context,
+    Worker::Lock& lock,
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
+  if (!util::Autogate::isEnabled(util::AutogateKey::SUBREQUEST_ORIGIN)) return;
+
+  KJ_IF_SOME(o, origin) {
+    jsg::Lock& js = lock;
+    // The IoOwn ensures that the reference is dropped on this IoContext's thread even when the
+    // async context frame holding it is collected elsewhere.
+    auto ioOwnOrigin = context.addObject(kj::mv(o));
+    auto originHandle = jsg::wrapOpaque(js.v8Context(), kj::mv(ioOwnOrigin));
+    scope.emplace(js, lock.getOriginAsyncContextKey(), js.v8Ref(originHandle));
+  }
+}
+
+IoContext::AsyncOriginScope IoContext::makeAsyncOriginScope(
+    Worker::Lock& lock, kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
+  return AsyncOriginScope(*this, lock, kj::mv(origin));
+}
+
+kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> IoContext::getCurrentOrigin() {
+  if (!util::Autogate::isEnabled(util::AutogateKey::SUBREQUEST_ORIGIN)) return kj::none;
+  if (incomingRequests.empty()) return kj::none;
+
+  // If called while lock is held, try to use the origin stored in the async context.
+  KJ_IF_SOME(lock, currentLock) {
+    KJ_IF_SOME(frame, jsg::AsyncContextFrame::current(lock)) {
+      KJ_IF_SOME(value, frame.get(*lock.getOriginAsyncContextKey())) {
+        auto handle = value.getHandle(lock);
+        jsg::Lock& js = lock;
+        auto& origin =
+            jsg::unwrapOpaqueRef<IoOwn<IoChannelFactory::SubrequestOrigin>>(js.v8Isolate, handle);
+        // An async context frame can be entered from a different IoContext than the one it was
+        // captured under, since frames belong to the isolate. Such an origin belongs to another
+        // IoContext's thread and events, so it is ignored. The IoOwn's fields are read directly
+        // because its accessors throw in that case.
+        if (origin.deleteQueue.get() == deleteQueue.queue.get() && origin.item != nullptr) {
+          return kj::addRef(*origin.item->ptr);
+        }
+      }
+    }
+  }
+
+  // If async context is unavailable (unset, or JS lock is not held), fall back to heuristic of
+  // using the origin of the most recent active request.
+  return getCurrentIncomingRequest().getOrigin();
 }
 
 SpanBuilder IoContext::makeTraceSpan(kj::ConstString operationName) {

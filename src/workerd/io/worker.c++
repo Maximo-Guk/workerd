@@ -1157,7 +1157,8 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
       impl(kj::heap<Impl>(*api, *metrics, *limitEnforcer, inspectorPolicy)),
       weakIsolateRef(WeakIsolateRef::wrap(this)),
       traceAsyncContextKey(kj::arc<jsg::AsyncContextFrame::StorageKey>()),
-      userTraceAsyncContextKey(kj::arc<jsg::AsyncContextFrame::StorageKey>()) {
+      userTraceAsyncContextKey(kj::arc<jsg::AsyncContextFrame::StorageKey>()),
+      originAsyncContextKey(kj::arc<jsg::AsyncContextFrame::StorageKey>()) {
   api->setIsolateObserver(*metrics);
   metrics->created();
   // We just created our isolate, so we don't need to use Isolate::Impl::Lock (nor an async lock).
@@ -1650,6 +1651,7 @@ Worker::Isolate::~Isolate() noexcept(false) {
     auto inspector = kj::mv(impl->inspector);
     auto dropTraceAsyncContextKey = kj::mv(traceAsyncContextKey);
     auto dropUserTraceAsyncContextKey = kj::mv(userTraceAsyncContextKey);
+    auto dropOriginAsyncContextKey = kj::mv(originAsyncContextKey);
     // The Rust Realm must be dropped under lock since Realm::drop() accesses V8 globals
     // and calls drop functions that may interact with V8.
     auto dropRealm = kj::mv(impl->realm);
@@ -2572,6 +2574,10 @@ kj::Arc<jsg::AsyncContextFrame::StorageKey> Worker::Lock::getTraceAsyncContextKe
 
 kj::Arc<jsg::AsyncContextFrame::StorageKey> Worker::Lock::getUserTraceAsyncContextKey() {
   return worker.getIsolate().userTraceAsyncContextKey.addRef();
+}
+
+kj::Arc<jsg::AsyncContextFrame::StorageKey> Worker::Lock::getOriginAsyncContextKey() {
+  return worker.getIsolate().originAsyncContextKey.addRef();
 }
 
 bool Worker::Lock::isInspectorEnabled() {
@@ -4011,7 +4017,8 @@ Worker::Actor::Actor(const Worker& worker,
   }
 }
 
-void Worker::Actor::ensureConstructed(IoContext& context) {
+void Worker::Actor::ensureConstructed(
+    IoContext& context, kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
   KJ_IF_SOME(info, impl->classInstance.tryGet<ActorClassInfo*>()) {
     // IMPORTANT: We need to set the state to "Initializing" synchronously, before
     // ensureConstructedImpl() actually executes and acquires the input lock.
@@ -4026,12 +4033,14 @@ void Worker::Actor::ensureConstructed(IoContext& context) {
     //
     // So the "actor still initializing" error in getHandler() should be impossible
     // unless a code path is bypassing the input lock mechanism.
-    context.addWaitUntil(ensureConstructedImpl(context, *info));
+    context.addWaitUntil(ensureConstructedImpl(context, *info, kj::mv(origin)));
     impl->classInstance = Impl::Initializing();
   }
 }
 
-kj::Promise<void> Worker::Actor::ensureConstructedImpl(IoContext& context, ActorClassInfo& info) {
+kj::Promise<void> Worker::Actor::ensureConstructedImpl(IoContext& context,
+    ActorClassInfo& info,
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
   InputGate::Lock inputLock = co_await impl->inputGate.wait(context.getCurrentTraceSpan());
 
   try {
@@ -4051,8 +4060,11 @@ kj::Promise<void> Worker::Actor::ensureConstructedImpl(IoContext& context, Actor
       containerRunning = status.getRunning();
     }
 
-    co_await context.run([this, &info, containerRunning](Worker::Lock& lock, IoContext& context) {
+    co_await context.run(
+        [this, &info, containerRunning, origin = kj::mv(origin)](
+            Worker::Lock& lock, IoContext& context) mutable {
       jsg::Lock& js = lock;
+      IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
 
       kj::Maybe<jsg::Ref<api::DurableObjectStorage>> storage;
       KJ_IF_SOME(c, impl->actorCache) {
@@ -4096,7 +4108,8 @@ kj::Promise<void> Worker::Actor::ensureConstructedImpl(IoContext& context, Actor
       impl->classInstance = kj::mv(handler);
 
       impl->metrics->constructorCompleted();
-    }, inputLock.addRef(context.getCurrentTraceSpan()));
+    },
+        inputLock.addRef(context.getCurrentTraceSpan()));
     // We addRef() the inputLock above rather than kj::mv() it so that the lock remains held
     // through the catch block below, if an exception is thrown. This is important since we
     // MUST update `impl->classInstance` to something other than `Initializing` before we

@@ -71,7 +71,8 @@ class WorkerEntrypoint final: public WorkerInterface {
       kj::Maybe<kj::Own<AccessInfo>> accessInfo,
       kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory,
       Persistent fromPersistentStub,
-      kj::Maybe<kj::String> clientAddress);
+      kj::Maybe<kj::String> clientAddress,
+      kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin);
 
   kj::Promise<void> request(kj::HttpMethod method,
       kj::StringPtr url,
@@ -125,7 +126,8 @@ class WorkerEntrypoint final: public WorkerInterface {
       kj::Maybe<kj::Own<BaseTracer>> workerTracer,
       kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
       kj::Maybe<kj::Own<AccessInfo>> accessInfo,
-      kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory);
+      kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory,
+      kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin);
 
   kj::Promise<void> requestImpl(kj::HttpMethod method,
       kj::StringPtr url,
@@ -245,7 +247,8 @@ kj::Own<WorkerInterface> WorkerEntrypoint::construct(ThreadContext& threadContex
     kj::Maybe<kj::Own<AccessInfo>> accessInfo,
     kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory,
     Persistent fromPersistentStub,
-    kj::Maybe<kj::String> clientAddress) {
+    kj::Maybe<kj::String> clientAddress,
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
   TRACE_EVENT("workerd", "WorkerEntrypoint::construct()");
 
   // If this request came from a stored ("persistent") stub, re-verify that the target worker still
@@ -271,7 +274,8 @@ kj::Own<WorkerInterface> WorkerEntrypoint::construct(ThreadContext& threadContex
       kj::mv(props), kj::mv(cfBlobJson), kj::mv(versionInfo), kj::mv(clientAddress));
   obj->init(kj::mv(worker), kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency),
       kj::mv(ioChannelFactory), kj::addRef(*metrics), kj::mv(workerTracer),
-      kj::mv(maybeTriggerInvocationSpan), kj::mv(accessInfo), kj::mv(selfTokenFactory));
+      kj::mv(maybeTriggerInvocationSpan), kj::mv(accessInfo), kj::mv(selfTokenFactory),
+      kj::mv(origin));
   auto& wrapper = metrics->wrapWorkerInterface(*obj);
   return kj::attachRef(wrapper, kj::mv(obj), kj::mv(metrics));
 }
@@ -307,7 +311,8 @@ void WorkerEntrypoint::init(kj::Own<const Worker> worker,
     kj::Maybe<kj::Own<BaseTracer>> workerTracer,
     kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
     kj::Maybe<kj::Own<AccessInfo>> accessInfo,
-    kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory) {
+    kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory,
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
   TRACE_EVENT("workerd", "WorkerEntrypoint::init()");
   // We need to construct the IoContext -- unless this is an actor and it already has a
   // IoContext, in which case we reuse it.
@@ -338,7 +343,7 @@ void WorkerEntrypoint::init(kj::Own<const Worker> worker,
 
   incomingRequest = kj::heap<IoContext::IncomingRequest>(kj::mv(context), kj::mv(ioChannelFactory),
       kj::mv(metrics), kj::mv(workerTracer), kj::mv(maybeTriggerInvocationSpan), kj::mv(accessInfo),
-      kj::mv(selfTokenFactory))
+      kj::mv(selfTokenFactory), kj::mv(origin))
                         .attach(kj::mv(actor));
 }
 
@@ -478,7 +483,11 @@ kj::Promise<void> WorkerEntrypoint::requestImpl(kj::HttpMethod method,
         // listener.
         if (proxyTask == kj::none && !loggedExceptionEarlier && abortController != kj::none) {
           auto ctrl = KJ_ASSERT_NONNULL(abortController).addRef();
-          context.addWaitUntil(context.run([ctrl = kj::mv(ctrl)](Worker::Lock& lock) mutable {
+          auto origin = incomingRequest->getOrigin();
+          context.addWaitUntil(context.run(
+              [ctrl = kj::mv(ctrl), origin = kj::mv(origin)](Worker::Lock& lock) mutable {
+            IoContext::AsyncOriginScope originScope =
+                IoContext::current().makeAsyncOriginScope(lock, kj::mv(origin));
             ctrl->getSignal()->triggerAbort(
                 lock, JSG_KJ_EXCEPTION(DISCONNECTED, DOMAbortError, "The client has disconnected"));
           }));
@@ -494,7 +503,7 @@ kj::Promise<void> WorkerEntrypoint::requestImpl(kj::HttpMethod method,
       KJ_TRY {
         api::DeferredProxy<void> deferredProxy = co_await context.run(
             [this, method, url, &headers, &requestBody, &wrappedResponse = *wrappedResponse,
-                entrypointName = entrypointName.clone(),
+                entrypointName = entrypointName.clone(), origin = incomingRequest->getOrigin(),
                 metrics = kj::addRef(incomingRequest->getMetrics())](
                 Worker::Lock& lock, IoContext& context) mutable {
           TRACE_EVENT_END("workerd", PERFETTO_TRACK_FROM_POINTER(&context));
@@ -503,6 +512,8 @@ kj::Promise<void> WorkerEntrypoint::requestImpl(kj::HttpMethod method,
           jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
           jsg::AsyncContextFrame::StorageScope userTraceScope =
               context.makeUserAsyncTraceScope(lock);
+          IoContext::AsyncOriginScope originScope =
+              context.makeAsyncOriginScope(lock, kj::mv(origin));
 
           kj::Maybe<jsg::Ref<api::AbortSignal>> signal;
           auto featureFlags = FeatureFlags::get(lock);
@@ -782,15 +793,17 @@ kj::Promise<void> WorkerEntrypoint::connect(kj::StringPtr host,
 
   auto metricsForCatch = kj::addRef(incomingRequest->getMetrics());
   auto wrappedResponse = kj::heap<ConnectResponseSentTracker>(response);
+  auto origin = incomingRequest->getOrigin();
 
   return wrapWithCanceler(
       context
           .run([this, &headers, &connection, &response = *wrappedResponse,
                    entrypointName = entrypointName.clone(), versionInfo = kj::mv(versionInfo),
-                   host = kj::str(host), clientAddress = kj::mv(clientAddress)](
-                   Worker::Lock& lock, IoContext& context) mutable {
+                   host = kj::str(host), clientAddress = kj::mv(clientAddress),
+                   origin = kj::mv(origin)](Worker::Lock& lock, IoContext& context) mutable {
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
     jsg::AsyncContextFrame::StorageScope userTraceScope = context.makeUserAsyncTraceScope(lock);
+    IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
 
     return lock.getGlobalScope().connect(kj::mv(host), kj::mv(clientAddress), headers, connection,
         response, lock,
@@ -928,13 +941,16 @@ kj::Promise<WorkerInterface::ScheduledResult> WorkerEntrypoint::runScheduled(
   incomingRequest->delivered();
 
   // Scheduled handlers run entirely in waitUntil() tasks.
-  context.addWaitUntil(context.run([scheduledTime, cron, entrypointName = entrypointName.clone(),
-                                       versionInfo = kj::mv(versionInfo), props = kj::mv(props),
-                                       &metrics = incomingRequest->getMetrics()](
-                                       Worker::Lock& lock, IoContext& context) mutable {
+  auto origin = incomingRequest->getOrigin();
+  context.addWaitUntil(
+      context.run([scheduledTime, cron, entrypointName = entrypointName.clone(),
+                      versionInfo = kj::mv(versionInfo), props = kj::mv(props),
+                      &metrics = incomingRequest->getMetrics(),
+                      origin = kj::mv(origin)](Worker::Lock& lock, IoContext& context) mutable {
     TRACE_EVENT("workerd", "WorkerEntrypoint::runScheduled() run");
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
     jsg::AsyncContextFrame::StorageScope userTraceScope = context.makeUserAsyncTraceScope(lock);
+    IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
 
     lock.getGlobalScope().startScheduled(scheduledTime, cron, lock,
         lock.getExportedHandler(
@@ -1008,13 +1024,16 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
       });
 
       KJ_TRY {
+        auto origin = incomingRequest->getOrigin();
         auto result = co_await context.run(
             [scheduledTime, retryCount, entrypointName = entrypointName.clone(),
-                versionInfo = kj::mv(versionInfo),
-                props = kj::mv(props)](Worker::Lock& lock, IoContext& context) mutable {
+                versionInfo = kj::mv(versionInfo), props = kj::mv(props),
+                origin = kj::mv(origin)](Worker::Lock& lock, IoContext& context) mutable {
           jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
           jsg::AsyncContextFrame::StorageScope userTraceScope =
               context.makeUserAsyncTraceScope(lock);
+          IoContext::AsyncOriginScope originScope =
+              context.makeAsyncOriginScope(lock, kj::mv(origin));
 
           // If we have an invalid timeout, set it to the default value of 15 minutes.
           auto timeout = context.getLimitEnforcer().getAlarmLimit();
@@ -1109,11 +1128,13 @@ kj::Promise<bool> WorkerEntrypoint::test() {
 
   context.addWaitUntil(
       context.run([entrypointName = entrypointName.clone(), versionInfo = kj::mv(versionInfo),
-                      props = kj::mv(props), &metrics = incomingRequest->getMetrics()](
+                      props = kj::mv(props), &metrics = incomingRequest->getMetrics(),
+                      origin = incomingRequest->getOrigin()](
                       Worker::Lock& lock, IoContext& context) mutable -> kj::Promise<void> {
     TRACE_EVENT("workerd", "WorkerEntrypoint::test() run");
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
     jsg::AsyncContextFrame::StorageScope userTraceScope = context.makeUserAsyncTraceScope(lock);
+    IoContext::AsyncOriginScope originScope = context.makeAsyncOriginScope(lock, kj::mv(origin));
 
     return context.awaitJs(lock,
         lock.getGlobalScope().test(lock,
@@ -1185,13 +1206,14 @@ kj::Own<WorkerInterface> newWorkerEntrypoint(ThreadContext& threadContext,
     kj::Maybe<kj::Own<AccessInfo>> accessInfo,
     kj::Maybe<kj::Own<IoChannelFactory::SelfTokenFactory>> selfTokenFactory,
     Persistent fromPersistentStub,
-    kj::Maybe<kj::String> clientAddress) {
+    kj::Maybe<kj::String> clientAddress,
+    kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin) {
   return WorkerEntrypoint::construct(threadContext, kj::mv(worker), kj::mv(entrypointName),
       kj::mv(props), kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency),
       kj::mv(ioChannelFactory), kj::mv(metrics), waitUntilTasks, tunnelExceptions,
       kj::mv(workerTracer), kj::mv(cfBlobJson), kj::mv(versionInfo),
       kj::mv(maybeTriggerInvocationSpan), isDynamicDispatch, kj::mv(accessInfo),
-      kj::mv(selfTokenFactory), fromPersistentStub, kj::mv(clientAddress));
+      kj::mv(selfTokenFactory), fromPersistentStub, kj::mv(clientAddress), kj::mv(origin));
 }
 
 }  // namespace workerd

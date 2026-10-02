@@ -145,6 +145,21 @@ class IoChannelFactory: public virtual kj::Refcounted {
   // surface only when the token is genuinely required.
   class SelfTokenFactory: public kj::Refcounted {};
 
+  // Opaque handle identifying an incoming event on whose behalf outgoing subrequests are made.
+  // The embedder may supply one when it constructs an `IoContext::IncomingRequest`. Subrequests
+  // made by code that descends from that event then carry it in `SubrequestMetadata::origin`, so
+  // that the embedder can attribute each subrequest to the event that caused it. See
+  // `IoContext::getCurrentOrigin()` for how the origin of a subrequest is chosen.
+  //
+  // This is intentionally an empty interface. It is only ever consumed by the embedder that
+  // supplied it, which downcasts it to an embedder-specific subtype.
+  //
+  // The refcount is not atomic: every reference must be added and dropped on the thread of the
+  // IoContext that the origin was given to. An origin can outlive the incoming event it was
+  // supplied with, because the async contexts and RPC capabilities created by that event's code
+  // hold references to it, so it should not keep per-event resources alive.
+  class SubrequestOrigin: public kj::Refcounted {};
+
   // The sender-selected retry token and retry flag for one logical actor call attempt.
   struct ActorRetryRequestMetadata {
     uint64_t nonce;
@@ -198,6 +213,10 @@ class IoChannelFactory: public virtual kj::Refcounted {
 
     // Address of the client as IP:port on whose behalf this request is being made.
     kj::Maybe<kj::String> clientAddress;
+
+    // The origin of the incoming event that the code making this subrequest descends from, if the
+    // embedder supplied one for that event. See `SubrequestOrigin`.
+    kj::Maybe<kj::Own<SubrequestOrigin>> origin;
   };
 
   // Parameters that can influence the version of a worker that is used to serve a subrequest.

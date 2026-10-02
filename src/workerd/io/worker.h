@@ -580,6 +580,7 @@ class Worker::Isolate: public kj::AtomicRefcounted {
   size_t nextRequestId = 0;
   kj::Arc<jsg::AsyncContextFrame::StorageKey> traceAsyncContextKey;
   kj::Arc<jsg::AsyncContextFrame::StorageKey> userTraceAsyncContextKey;
+  kj::Arc<jsg::AsyncContextFrame::StorageKey> originAsyncContextKey;
 
   friend class Worker;
 };
@@ -803,6 +804,9 @@ class Worker::Lock {
   // Get the opaque storage key to use for recording user trace information in async contexts.
   kj::Arc<jsg::AsyncContextFrame::StorageKey> getUserTraceAsyncContextKey();
 
+  // Get the opaque storage key to use for recording the subrequest origin in async contexts.
+  kj::Arc<jsg::AsyncContextFrame::StorageKey> getOriginAsyncContextKey();
+
  private:
   explicit Lock(const Worker& worker, LockType lockType, jsg::V8StackScope&);
   struct Impl;
@@ -1025,7 +1029,10 @@ class Worker::Actor final: public kj::Refcounted {
   //
   // This is used only for modules-syntax actors (which most are, since that's the only format we
   // support publicly).
-  void ensureConstructed(IoContext&);
+  //
+  // `origin` is the origin of the incoming request being delivered. If this call is the one that
+  // starts the constructor, the constructor runs with that origin in its async context.
+  void ensureConstructed(IoContext&, kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin);
 
   // Forces cancellation of all "background work" this actor is executing, i.e. work that is not
   // happening on behalf of an active request. Note that this is not a part of the dtor because
@@ -1165,7 +1172,9 @@ class Worker::Actor final: public kj::Refcounted {
   kj::Maybe<api::ExportedHandler&> getHandler();
   friend class Worker;
 
-  kj::Promise<void> ensureConstructedImpl(IoContext&, ActorClassInfo& info);
+  kj::Promise<void> ensureConstructedImpl(IoContext&,
+      ActorClassInfo& info,
+      kj::Maybe<kj::Own<IoChannelFactory::SubrequestOrigin>> origin);
 };
 
 WD_STRONG_BOOL(PopulateVersionInfoMetadata);
