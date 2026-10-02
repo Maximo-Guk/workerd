@@ -1,0 +1,27 @@
+src/workerd/api/actor-state.c++
+  s_d1bbaf80186abb::t_0851107d0ea965 1010-1011
+src/workerd/api/actor.c++
+  s_d1bbaf80186abb::t_782cd2ccb30955 74-75,147-148,186-187
+src/workerd/api/http.c++
+  s_d1bbaf80186abb::t_08e737dc6071fb 2816-2817,2894-2895
+src/workerd/api/kv.c++
+  s_d1bbaf80186abb::t_bcff2d2b54fb47 119
+src/workerd/api/r2-bucket.c++
+  s_d1bbaf80186abb::t_8159b7bcf6776c 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e79db4ecfae2e106f9f798b57f5803ee618a62d9",
+  "prompts": {},
+  "sessions": {
+    "s_d1bbaf80186abb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bc76a637-aa82-4154-bd22-48bced9fd203",
+        "model": "claude-odango-eap"
+      },
+      "human_author": "Maximo Guk <maximo@cloudflare.com>"
+    }
+  }
+}
