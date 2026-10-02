@@ -1,0 +1,35 @@
+src/workerd/api/hibernatable-web-socket.c++
+  s_d1bbaf80186abb::t_c9d634f10d9886 67,70-73
+src/workerd/api/queue.c++
+  s_d1bbaf80186abb::t_1bee2778446df4 711-712,715
+src/workerd/api/restore.c++
+  s_d1bbaf80186abb::t_b27212b8499e15 308-313,437-442
+src/workerd/api/sockets.c++
+  s_d1bbaf80186abb::t_4d3349873d9ff2 624,626,630
+src/workerd/api/trace.c++
+  s_d1bbaf80186abb::t_673b1208c26ca1 718,722-723,726
+src/workerd/api/web-socket.c++
+  s_d1bbaf80186abb::t_996c6cafa7ed2b 786-789,1407-1408
+src/workerd/api/web-socket.h
+  s_d1bbaf80186abb::t_5520d3e679aa26 10,754-757
+src/workerd/api/worker-rpc.c++
+  s_d1bbaf80186abb::t_eb5722433ed1e1 427-435,2086-2088,2321,2608,2629,2653-2657,2723-2729,3186-3187,3198-3199,3302-3304,3333-3336,3417-3418
+src/workerd/io/trace-stream.c++
+  s_d1bbaf80186abb::t_c8789d439957d0 737-738,744-745,779-781,1085-1088,1115-1116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b102bbe3c0f8fa67ac43c368757e7f7c117e7cb2",
+  "prompts": {},
+  "sessions": {
+    "s_d1bbaf80186abb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bc76a637-aa82-4154-bd22-48bced9fd203",
+        "model": "claude-odango-eap"
+      },
+      "human_author": "Maximo Guk <maximo@cloudflare.com>"
+    }
+  }
+}
