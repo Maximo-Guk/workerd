@@ -1,0 +1,23 @@
+src/workerd/api/tests/tail-worker-test.js
+  s_db7bee2e750772::t_e86d844073ab05 337,343,395
+src/workerd/io/io-context.c++
+  s_db7bee2e750772::t_0ab3eb5fa43b38 1350-1360,1363-1365,1691-1713
+src/workerd/io/io-context.h
+  s_db7bee2e750772::t_176249ff79d5ba 1315-1326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7e6c7b072eab1b8125ae57171a1ed6339531bbb9",
+  "prompts": {},
+  "sessions": {
+    "s_db7bee2e750772": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9e6d66a-cb91-48a4-baa7-e80bc4aee177",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    }
+  }
+}

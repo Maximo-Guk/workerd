@@ -1,0 +1,35 @@
+src/cloudflare/internal/aig-api.ts
+  s_1dac6d56438157::t_b2acb16abda418 6-12,274-327
+types/defines/aig.d.ts
+  s_1dac6d56438157::t_23ece20256d35a 84,125
+types/generated-snapshot/experimental/index.d.ts
+  s_1dac6d56438157::t_900c0390cc8bfb 12114
+types/generated-snapshot/experimental/index.ts
+  s_1dac6d56438157::t_c933d9b2cc974f 12128
+types/generated-snapshot/index.d.ts
+  s_1dac6d56438157::t_7d1ef8073728db 11824
+types/generated-snapshot/index.ts
+  s_1dac6d56438157::t_d0ebe47a89d825 11838
+types/test/types/ai.ts
+  s_1dac6d56438157::t_1ee54298b03130 65-81
+src/cloudflare/internal/test/aig/aig-api-test.js
+  s_1dac6d56438157::t_328c2388054a6b 265-418
+src/cloudflare/internal/test/aig/aig-mock.js
+  s_1dac6d56438157::t_9397711cb1d4c1 7-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5bcdd082b44254ff5e785961741821a7beef0814",
+  "prompts": {},
+  "sessions": {
+    "s_1dac6d56438157": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "21fbf310-06f3-4616-af34-aee2cfc35de6",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+src/workerd/api/tests/js-rpc-test.js
+  s_1ac369e8cc195c::t_8289f00a04e387 65-77,154-156,209-247,671-687,1398-1660
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "97fd3347a089029a923e81e0c9544362ca6f0cd9",
+  "prompts": {},
+  "sessions": {
+    "s_1ac369e8cc195c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_1ac369e8cc195c",
+        "model": "unknown"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    }
+  }
+}

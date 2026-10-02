@@ -1,0 +1,21 @@
+src/workerd/api/worker-rpc.c++
+  s_673ef6d1fb1277::t_0b8f0879b359ea 971-1006,2111-2141
+src/workerd/api/worker-rpc.h
+  s_673ef6d1fb1277::t_1cb769d74a10f3 19,429-479,546-560,566,571-576,734-735
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7e5c0542f6e53a39ceb74da3f4508af6a039b6a2",
+  "prompts": {},
+  "sessions": {
+    "s_673ef6d1fb1277": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_673ef6d1fb1277",
+        "model": "unknown"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    }
+  }
+}
